@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import List, Optional
 import shutil
 import sys
+import ssl
+import os
 
 try:
     import whisper
@@ -27,15 +29,41 @@ except ImportError:
 from config import (
     INPUT_DIR, OUTPUT_DIR, PROCESSED_DIR,
     WHISPER_MODEL, POLL_INTERVAL, SUPPORTED_FORMATS,
-    EMAIL_CONFIG, LOGGING_CONFIG
+    EMAIL_CONFIG, LOGGING_CONFIG, SSL_VERIFY
 )
 
 
 class AudioTranscriber:
     def __init__(self):
+        self.setup_ssl()
         self.setup_logging()
         self.setup_directories()
         self.load_whisper_model()
+        
+    def setup_ssl(self):
+        """Configure SSL settings for networks with certificate issues"""
+        if not SSL_VERIFY:
+            # Print warning early since logger may not be set up yet
+            print("SSL verification disabled - this reduces security")
+            
+            # Set environment variables first (these affect urllib and other libraries)
+            os.environ['PYTHONHTTPSVERIFY'] = '0'
+            os.environ['CURL_CA_BUNDLE'] = ''
+            os.environ['REQUESTS_CA_BUNDLE'] = ''
+            
+            # Monkey patch urllib to disable SSL verification
+            import urllib.request
+            import urllib.error
+            
+            # Create an SSL context that doesn't verify certificates
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            # Replace the default HTTPS handler
+            https_handler = urllib.request.HTTPSHandler(context=ssl_context)
+            opener = urllib.request.build_opener(https_handler)
+            urllib.request.install_opener(opener)
         
     def setup_logging(self):
         """Configure logging system"""
@@ -61,10 +89,28 @@ class AudioTranscriber:
         """Load the Whisper model"""
         try:
             self.logger.info(f"Loading Whisper model: {WHISPER_MODEL}")
+            
+            # Handle SSL issues by temporarily disabling verification if needed
+            if not SSL_VERIFY:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                
             self.model = whisper.load_model(WHISPER_MODEL)
             self.logger.info("Whisper model loaded successfully")
         except Exception as e:
             error_msg = f"Failed to load Whisper model: {str(e)}"
+            
+            # Provide helpful error message for SSL issues
+            if "CERTIFICATE_VERIFY_FAILED" in str(e):
+                ssl_help = (
+                    "\n\nSSL Certificate Error Detected!\n"
+                    "This often happens on corporate networks or with proxy settings.\n"
+                    "To fix this, edit config.py and set: SSL_VERIFY = False\n"
+                    "Warning: This reduces security but allows the script to work."
+                )
+                error_msg += ssl_help
+                self.logger.error("SSL certificate verification failed. Consider setting SSL_VERIFY = False in config.py")
+            
             self.logger.error(error_msg)
             self.send_error_email("Model Loading Error", error_msg)
             raise

@@ -58,3 +58,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+install_service.sh
+com.voicememo.transcriber.plist

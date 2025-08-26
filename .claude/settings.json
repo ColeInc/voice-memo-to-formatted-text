@@ -1,0 +1,32 @@
+  {
+    "hooks": {
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "afplay -v 5 /System/Library/Sounds/Hero.aiff"
+            },
+            {
+              "type": "command",
+              "command": "notify-send 'Claude Code' 'Awaiting your input'"
+            }
+          ]
+        }
+      ],
+      "Notification": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "afplay -v 5 /System/Library/Sounds/Hero.aiff"
+            },
+            {
+              "type": "command",
+              "command": "notify-send 'Claude Code' 'Awaiting your input'"
+            }
+          ]
+        }
+      ]
+    }
+  }

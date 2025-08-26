@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 # Directory Configuration
@@ -9,6 +8,9 @@ PROCESSED_DIR = INPUT_DIR / "processed"
 
 # Whisper Configuration
 WHISPER_MODEL = "large"
+
+# SSL Configuration (for networks with certificate issues)
+SSL_VERIFY = False  # Set to False if you have SSL certificate issues
 
 # Polling Configuration
 POLL_INTERVAL = 10  # seconds

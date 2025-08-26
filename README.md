@@ -40,7 +40,24 @@ EMAIL_CONFIG = {
 3. Generate an app password for this application
 4. Use the generated password (not your regular Gmail password)
 
-### 3. Directory Structure
+### 3. SSL Certificate Issues (Corporate Networks)
+
+If you encounter SSL certificate errors during model download:
+
+```bash
+CERTIFICATE_VERIFY_FAILED: certificate verify failed: self-signed certificate
+```
+
+This is common on corporate networks with SSL inspection. To fix:
+
+1. Edit `config.py` and set:
+```python
+SSL_VERIFY = False  # Reduces security but allows the script to work
+```
+
+2. Alternatively, configure your certificates properly (recommended for production)
+
+### 4. Directory Structure
 
 The system automatically creates these directories:
 - `INPUT/` - Drop audio files here
@@ -51,14 +68,36 @@ The system automatically creates these directories:
 
 ### Start the Service
 
+#### Manual Start
 ```bash
-python transcribe_audio.py
+python3 transcribe_audio.py
 ```
 
 The service will:
 1. Start monitoring the INPUT directory
 2. Process any existing audio files
 3. Continue monitoring for new files every 10 seconds
+
+#### Automatic Startup (Run at Boot)
+
+**macOS:** Use the provided installation script:
+```bash
+./install_service.sh
+```
+
+This will:
+- Install a launchd service that starts at login
+- Run the transcriber continuously in the background
+- Create log files for monitoring
+
+To uninstall:
+```bash
+./uninstall_service.sh
+```
+
+**Linux:** See `LINUX_SETUP.md` for systemd service configuration.
+
+**Windows:** Use Task Scheduler to run the script at startup (see troubleshooting section).
 
 ### Process Audio Files
 
@@ -119,8 +158,16 @@ Processing errors automatically trigger email notifications to `colehmcconnell@g
 pip install -r requirements.txt
 ```
 
+**SSL Certificate Errors**
+```
+CERTIFICATE_VERIFY_FAILED: certificate verify failed: self-signed certificate
+```
+- Edit `config.py` and set `SSL_VERIFY = False`
+- This commonly occurs on corporate networks with SSL inspection
+- Alternative: Configure proper certificates (more secure)
+
 **"CUDA out of memory" (if using GPU)**
-- Switch to a smaller model (medium, small, base, tiny)
+- Switch to a smaller model (medium, small, base, tiny) in `config.py`
 - Or add CPU-only processing: `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu`
 
 **Email notifications not working**
@@ -132,6 +179,21 @@ pip install -r requirements.txt
 - Ensure files are in supported formats
 - Check file permissions
 - Monitor `transcription.log` for errors
+
+**Service not starting automatically (macOS)**
+- Check if the service is loaded: `launchctl list | grep voicememo`
+- View service logs: `tail -f launchd.log` and `tail -f launchd_error.log`
+- Reinstall service: `./uninstall_service.sh` then `./install_service.sh`
+- Check file permissions on the project directory
+
+**Windows Startup Setup**
+Create a batch file `start_transcriber.bat`:
+```batch
+@echo off
+cd /d "C:\path\to\your\project"
+python transcribe_audio.py
+```
+Then add this batch file to Windows Task Scheduler with "Run at startup" trigger.
 
 ### Performance
 
