@@ -19,6 +19,8 @@ import shutil
 import sys
 import ssl
 import os
+import threading
+import re
 
 try:
     import whisper
@@ -29,7 +31,7 @@ except ImportError:
 from config import (
     INPUT_DIR, OUTPUT_DIR, PROCESSED_DIR,
     WHISPER_MODEL, POLL_INTERVAL, SUPPORTED_FORMATS,
-    EMAIL_CONFIG, LOGGING_CONFIG, SSL_VERIFY
+    EMAIL_CONFIG, LOGGING_CONFIG, SSL_VERIFY, PROGRESS_CONFIG
 )
 
 
@@ -39,6 +41,8 @@ class AudioTranscriber:
         self.setup_logging()
         self.setup_directories()
         self.load_whisper_model()
+        self.last_progress = 0  # Track last reported progress percentage
+        self.heartbeat_active = False  # Flag for heartbeat thread
         
     def setup_ssl(self):
         """Configure SSL settings for networks with certificate issues"""
@@ -175,14 +179,89 @@ class AudioTranscriber:
             self.logger.error(error_msg)
             self.send_error_email("Directory Scan Error", error_msg)
             return []
+    
+    def progress_callback(self, segments, segment_size, left_segment, rate):
+        """Progress callback for transcription with mad-whisper-progress"""
+        if not PROGRESS_CONFIG['enabled']:
+            return
+            
+        # Convert rate to percentage
+        progress_percent = int(rate * 100)
+        
+        # Only log at specified intervals to avoid spam
+        if progress_percent >= self.last_progress + PROGRESS_CONFIG['update_interval']:
+            self.last_progress = progress_percent
+            
+            # Log progress with optional time estimate
+            if PROGRESS_CONFIG['show_time_estimate'] and rate > 0:
+                # Simple time estimate based on current progress
+                elapsed_time = time.time() - self.transcription_start_time
+                if rate > 0.01:  # Avoid division by very small numbers
+                    estimated_total = elapsed_time / rate
+                    remaining_time = estimated_total - elapsed_time
+                    remaining_min = int(remaining_time // 60)
+                    remaining_sec = int(remaining_time % 60)
+                    
+                    self.logger.info(f"Transcription progress: {progress_percent}% complete "
+                                   f"(~{remaining_min}m {remaining_sec}s remaining)")
+                else:
+                    self.logger.info(f"Transcription progress: {progress_percent}% complete")
+            else:
+                self.logger.info(f"Transcription progress: {progress_percent}% complete")
+    
+    def heartbeat_progress(self, filename: str):
+        """Fallback progress indicator using threading"""
+        if not PROGRESS_CONFIG['enabled']:
+            return
+            
+        start_time = time.time()
+        while self.heartbeat_active:
+            elapsed_time = time.time() - start_time
+            elapsed_min = int(elapsed_time // 60)
+            elapsed_sec = int(elapsed_time % 60)
+            self.logger.info(f"Transcribing {filename}... ({elapsed_min}m {elapsed_sec}s elapsed)")
+            
+            # Wait for 30 seconds or until heartbeat is stopped
+            for _ in range(30):
+                if not self.heartbeat_active:
+                    break
+                time.sleep(1)
             
     def transcribe_audio(self, audio_file: Path) -> Optional[str]:
         """Transcribe audio file using Whisper"""
+        heartbeat_thread = None
         try:
             self.logger.info(f"Starting transcription of: {audio_file.name}")
             start_time = time.time()
+            self.transcription_start_time = start_time  # Store for progress callback
+            self.last_progress = 0  # Reset progress tracker
             
-            result = self.model.transcribe(str(audio_file))
+            # Start heartbeat thread as fallback
+            if PROGRESS_CONFIG['enabled']:
+                self.heartbeat_active = True
+                heartbeat_thread = threading.Thread(
+                    target=self.heartbeat_progress, 
+                    args=(audio_file.name,)
+                )
+                heartbeat_thread.daemon = True
+                heartbeat_thread.start()
+            
+            # Try to use progress callback first, fall back to regular transcribe
+            try:
+                if PROGRESS_CONFIG['enabled']:
+                    result = self.model.transcribe(str(audio_file), progress=self.progress_callback)
+                else:
+                    result = self.model.transcribe(str(audio_file))
+            except TypeError as e:
+                # If progress parameter is not supported, fall back to regular transcribe
+                self.logger.warning(f"Progress callback not supported, using fallback: {e}")
+                result = self.model.transcribe(str(audio_file))
+            
+            # Stop heartbeat thread
+            if heartbeat_thread:
+                self.heartbeat_active = False
+                heartbeat_thread.join(timeout=1)
+                
             transcript = result["text"].strip()
             
             processing_time = time.time() - start_time
@@ -192,6 +271,11 @@ class AudioTranscriber:
             return transcript
             
         except Exception as e:
+            # Stop heartbeat thread if running
+            if heartbeat_thread:
+                self.heartbeat_active = False
+                heartbeat_thread.join(timeout=1)
+                
             error_msg = f"Error transcribing {audio_file.name}: {str(e)}"
             self.logger.error(error_msg)
             self.send_error_email("Transcription Error", f"File: {audio_file.name}\n{error_msg}")
@@ -200,9 +284,29 @@ class AudioTranscriber:
     def save_transcript(self, transcript: str, original_filename: str) -> Optional[Path]:
         """Save transcript to OUTPUT directory with timestamp"""
         try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            base_name = Path(original_filename).stem
-            output_filename = f"{timestamp}_{base_name}_transcript.txt"
+            # Format: 2025-08-25_4-16-56pm.txt
+            now = datetime.now()
+            date_part = now.strftime('%Y-%m-%d')
+            hour = now.hour
+            minute = now.minute
+            second = now.second
+            
+            # Convert to 12-hour format
+            if hour == 0:
+                hour_12 = 12
+                am_pm = 'am'
+            elif hour < 12:
+                hour_12 = hour
+                am_pm = 'am'
+            elif hour == 12:
+                hour_12 = 12
+                am_pm = 'pm'
+            else:
+                hour_12 = hour - 12
+                am_pm = 'pm'
+            
+            time_part = f"{hour_12}-{minute:02d}-{second:02d}{am_pm}"
+            output_filename = f"{date_part}_{time_part}.txt"
             output_path = OUTPUT_DIR / output_filename
             
             formatted_transcript = self.format_transcript(transcript, original_filename)
@@ -219,9 +323,84 @@ class AudioTranscriber:
             self.send_error_email("File Save Error", error_msg)
             return None
             
+    def add_paragraph_breaks(self, transcript: str) -> str:
+        """Add intelligent paragraph breaks to transcript based on speech patterns"""
+        if not transcript.strip():
+            return transcript
+            
+        # Clean up the transcript first
+        text = transcript.strip()
+        
+        # Split into sentences (basic approach)
+        sentences = re.split(r'[.!?]+', text)
+        
+        # Remove empty sentences and strip whitespace
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        if not sentences:
+            return transcript
+            
+        paragraphs = []
+        current_paragraph = []
+        sentence_count = 0
+        
+        for sentence in sentences:
+            # Add the sentence to current paragraph
+            current_paragraph.append(sentence)
+            sentence_count += 1
+            
+            # Determine if we should start a new paragraph based on:
+            # 1. Length - after 3-5 sentences
+            # 2. Topic indicators - words that suggest topic changes
+            # 3. Time indicators - words that suggest time progression
+            
+            should_break = False
+            
+            # Check for natural paragraph break indicators
+            topic_indicators = [
+                'however', 'but', 'although', 'meanwhile', 'furthermore',
+                'additionally', 'on the other hand', 'in contrast', 
+                'speaking of', 'moving on', 'another thing', 'also',
+                'next', 'then', 'after that', 'later', 'earlier',
+                'first', 'second', 'third', 'finally', 'in conclusion'
+            ]
+            
+            # Check if sentence starts with a topic indicator
+            sentence_lower = sentence.lower()
+            for indicator in topic_indicators:
+                if sentence_lower.startswith(indicator):
+                    should_break = True
+                    break
+            
+            # Break after 3-5 sentences regardless
+            if sentence_count >= 4:
+                should_break = True
+            
+            # If very long sentence (likely run-on), break after it
+            if len(sentence) > 150:
+                should_break = True
+                
+            if should_break and len(current_paragraph) > 1:
+                # Join current paragraph and add to paragraphs
+                paragraph_text = '. '.join(current_paragraph) + '.'
+                paragraphs.append(paragraph_text)
+                current_paragraph = []
+                sentence_count = 0
+        
+        # Add remaining sentences as final paragraph
+        if current_paragraph:
+            paragraph_text = '. '.join(current_paragraph) + '.'
+            paragraphs.append(paragraph_text)
+        
+        # Join paragraphs with double newlines
+        return '\n\n'.join(paragraphs)
+    
     def format_transcript(self, transcript: str, original_filename: str) -> str:
-        """Format transcript with metadata"""
+        """Format transcript with metadata and paragraph breaks"""
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Add intelligent paragraph breaks
+        formatted_transcript = self.add_paragraph_breaks(transcript)
         
         formatted = f"""Voice Memo Transcript
 ======================
@@ -233,7 +412,7 @@ Model Used: {WHISPER_MODEL}
 Transcript:
 -----------
 
-{transcript}
+{formatted_transcript}
 
 ---
 Generated by Voice Memo Transcription System
