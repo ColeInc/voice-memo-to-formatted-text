@@ -62,7 +62,7 @@ SSL_VERIFY = False  # Reduces security but allows the script to work
 The system automatically creates these directories:
 - `INPUT/` - Drop audio files here
 - `OUTPUT/` - Transcripts are saved here
-- `INPUT/processed/` - Processed audio files are moved here
+- `PROCESSED/` - Processed audio files are moved here
 
 ## Usage
 
@@ -104,7 +104,7 @@ To uninstall:
 1. Drop audio files into the `INPUT/` directory
 2. Files are processed automatically in chronological order
 3. Transcripts appear in `OUTPUT/` directory with timestamps
-4. Original files are moved to `INPUT/processed/`
+4. Original files are moved to `PROCESSED/`
 
 ### Output Format
 

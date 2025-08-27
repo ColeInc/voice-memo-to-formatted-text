@@ -5,7 +5,7 @@ INPUT/
 OUTPUT/
 
 # Processed audio files
-INPUT/processed/
+PROCESSED/
 
 # Python
 __pycache__/
