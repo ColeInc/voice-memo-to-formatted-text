@@ -28,7 +28,15 @@ SSL_VERIFY = False  # Set to False if you have SSL certificate issues
 POLL_INTERVAL = 10  # seconds
 
 # Supported Audio Formats
-SUPPORTED_FORMATS = {'.mp3', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma', '.mp4'}
+SUPPORTED_FORMATS = {'.mp3', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma', '.mp4', '.mov'}
+
+# Video Processing Configuration
+VIDEO_FORMATS = {'.mp4', '.mov'}
+AUDIO_EXTRACTION_CONFIG = {
+    'output_format': 'mp3',  # Format for extracted audio
+    'audio_quality': '192k',  # Audio bitrate for extraction
+    'temp_dir': BASE_DIR / "temp_audio"  # Temporary directory for extracted audio
+}
 
 # Email Configuration
 EMAIL_CONFIG = {
