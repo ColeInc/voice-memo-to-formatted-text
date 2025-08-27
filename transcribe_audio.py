@@ -313,14 +313,72 @@ class AudioTranscriber:
                     break
                 time.sleep(1)
             
+    def preprocess_audio_for_whisper(self, audio_file: Path) -> Optional[Path]:
+        """Preprocess audio file to ensure Whisper compatibility"""
+        try:
+            # Generate temporary preprocessed filename
+            preprocessed_filename = f"{audio_file.stem}_preprocessed.wav"
+            preprocessed_path = AUDIO_EXTRACTION_CONFIG['temp_dir'] / preprocessed_filename
+            
+            # Remove temp file if it exists
+            if preprocessed_path.exists():
+                preprocessed_path.unlink()
+            
+            self.logger.info(f"Preprocessing audio for Whisper compatibility: {audio_file.name}")
+            
+            # Use ffmpeg to normalize audio for Whisper:
+            # - Convert to mono
+            # - Resample to 16kHz (Whisper's preferred rate) 
+            # - Use WAV format with 16-bit PCM
+            # - Apply audio normalization to prevent tensor size issues
+            stream = ffmpeg.input(str(audio_file))
+            audio_stream = stream.audio
+            
+            # Apply comprehensive preprocessing for Whisper compatibility
+            out = ffmpeg.output(
+                audio_stream,
+                str(preprocessed_path),
+                acodec='pcm_s16le',  # 16-bit PCM WAV
+                ac=1,               # Force mono
+                ar=16000,           # 16kHz sample rate (Whisper standard)
+                af='highpass=f=200,lowpass=f=3000,dynaudnorm',  # Audio filters for voice
+                loglevel='error'    # Reduce ffmpeg output verbosity
+            )
+            
+            # Run the preprocessing
+            ffmpeg.run(out, quiet=True, overwrite_output=True)
+            
+            if preprocessed_path.exists():
+                self.logger.info(f"Audio preprocessed successfully: {preprocessed_path.name}")
+                return preprocessed_path
+            else:
+                self.logger.error("Audio preprocessing failed - output file not created")
+                return None
+                
+        except Exception as e:
+            error_msg = f"Error preprocessing audio {audio_file.name}: {str(e)}"
+            self.logger.error(error_msg)
+            return None
+    
     def transcribe_audio(self, audio_file: Path) -> Optional[str]:
-        """Transcribe audio file using Whisper"""
+        """Transcribe audio file using Whisper with preprocessing"""
         heartbeat_thread = None
+        preprocessed_audio = None
+        
         try:
             self.logger.info(f"Starting transcription of: {audio_file.name}")
             start_time = time.time()
             self.transcription_start_time = start_time  # Store for progress callback
             self.last_progress = 0  # Reset progress tracker
+            
+            # Preprocess audio for Whisper compatibility
+            preprocessed_audio = self.preprocess_audio_for_whisper(audio_file)
+            if not preprocessed_audio:
+                self.logger.error(f"Failed to preprocess audio: {audio_file.name}")
+                return None
+            
+            # Use the preprocessed audio for transcription
+            audio_to_transcribe = preprocessed_audio
             
             # Start heartbeat thread as fallback
             if PROGRESS_CONFIG['enabled']:
@@ -332,7 +390,6 @@ class AudioTranscriber:
                 heartbeat_thread.daemon = True
                 heartbeat_thread.start()
             
-            # Try to use progress callback first, fall back to regular transcribe
             # Apply performance optimizations to transcription
             transcribe_options = {
                 'fp16': self.device != "cpu",  # Use FP16 precision on GPU for speed
@@ -345,13 +402,33 @@ class AudioTranscriber:
             
             try:
                 if PROGRESS_CONFIG['enabled']:
-                    result = self.model.transcribe(str(audio_file), progress=self.progress_callback, **transcribe_options)
+                    result = self.model.transcribe(str(audio_to_transcribe), progress=self.progress_callback, **transcribe_options)
                 else:
-                    result = self.model.transcribe(str(audio_file), **transcribe_options)
-            except TypeError as e:
-                # If progress parameter is not supported, fall back to regular transcribe
-                self.logger.warning(f"Progress callback not supported, using fallback: {e}")
-                result = self.model.transcribe(str(audio_file), **transcribe_options)
+                    result = self.model.transcribe(str(audio_to_transcribe), **transcribe_options)
+            except (TypeError, RuntimeError) as e:
+                self.logger.warning(f"Primary transcription failed: {e}. Trying fallback method...")
+                # Try with more conservative options
+                fallback_options = {
+                    'fp16': False,  # Disable FP16 to avoid precision issues
+                    'language': 'english',
+                    'condition_on_previous_text': True,  # Re-enable for better context
+                    'temperature': 0.2,  # Slightly higher temperature for robustness
+                    'word_timestamps': False,  # Disable word timestamps to reduce complexity
+                    'verbose': False  # Reduce output verbosity
+                }
+                
+                try:
+                    self.logger.info("Attempting transcription with fallback options...")
+                    result = self.model.transcribe(str(audio_to_transcribe), **fallback_options)
+                except Exception as fallback_error:
+                    self.logger.error(f"Fallback transcription also failed: {fallback_error}")
+                    # Try most basic transcription
+                    try:
+                        self.logger.info("Attempting basic transcription without options...")
+                        result = self.model.transcribe(str(audio_to_transcribe))
+                    except Exception as basic_error:
+                        self.logger.error(f"All transcription methods failed: {basic_error}")
+                        raise basic_error
             
             # Stop heartbeat thread
             if heartbeat_thread:
@@ -384,6 +461,15 @@ class AudioTranscriber:
             self.send_error_email("Transcription Error", f"File: {audio_file.name}\n{error_msg}")
             return None
             
+        finally:
+            # Clean up preprocessed audio file
+            if preprocessed_audio and preprocessed_audio.exists():
+                try:
+                    preprocessed_audio.unlink()
+                    self.logger.info(f"Cleaned up preprocessed audio: {preprocessed_audio.name}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to cleanup preprocessed audio {preprocessed_audio.name}: {str(e)}")
+            
     def save_transcript(self, transcript: str, original_filename: str) -> Optional[Path]:
         """Save transcript to OUTPUT directory with timestamp"""
         try:
@@ -409,7 +495,17 @@ class AudioTranscriber:
                 am_pm = 'pm'
             
             time_part = f"{hour_12}-{minute:02d}-{second:02d}{am_pm}"
-            output_filename = f"{date_part}_{time_part}.md"
+            
+            # Create a sanitized snippet of the original filename (max 20 chars)
+            original_name_base = Path(original_filename).stem  # Remove extension
+            # Replace problematic characters with dashes
+            sanitized_name = re.sub(r'[^a-zA-Z0-9\s\-_]', '', original_name_base)
+            # Replace spaces and multiple dashes with single dashes
+            sanitized_name = re.sub(r'[\s\-_]+', '-', sanitized_name)
+            # Trim to max 20 characters and remove trailing dashes
+            name_snippet = sanitized_name[:20].strip('-')
+            
+            output_filename = f"{date_part}_{time_part}-{name_snippet}.md"
             output_path = OUTPUT_DIR / output_filename
             
             formatted_transcript = self.format_transcript(transcript, original_filename)
