@@ -69,7 +69,7 @@ GEMINI_CONFIG = {
     'api_key': os.getenv('GEMINI_API_KEY', ''),
     'model': 'gemini-1.5-flash',  # Fast and cost-effective model
     'enabled': bool(os.getenv('GEMINI_API_KEY', '')),  # Auto-enable if API key is present
-    'prompt': """take the following text which is a series of notes collected by me. i want you to separate it into respective sections and provide meaningful titles for each section you deem to be on a different topic/key point. E.g. there may be numerous snippets of advice from a podcast, and i want you to take the existing text, leave it exactly as it is, but insert headings at the places you deem necessary. give me back nicely formatted markdown in your response""",
+    'prompt': """take the following text which is a series of notes collected by me. i want you to separate it into respective sections and provide meaningful titles for each section you deem to be on a different topic/key point. E.g. there may be numerous snippets of advice from a podcast, and i want you to take the existing text, leave it exactly as it is, but insert headings at the places you deem necessary. Additionally, create a relevant overall title for the entire text content that summarizes the main theme or topic. Your response should start with a main title using # (H1) heading, followed by the formatted content with section headings. Give me back nicely formatted markdown in your response""",
     'timeout': 30,  # seconds
     'max_retries': 3
 }
