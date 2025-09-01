@@ -28,6 +28,9 @@ try:
     import whisper
     import ffmpeg
     import google.generativeai as genai
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+    from google.oauth2 import service_account
 except ImportError as e:
     if "whisper" in str(e):
         print("Error: OpenAI Whisper not installed. Please run: pip install -r requirements.txt")
@@ -35,6 +38,8 @@ except ImportError as e:
         print("Error: ffmpeg-python not installed. Please run: pip install -r requirements.txt")
     elif "google.generativeai" in str(e):
         print("Error: Google Generative AI not installed. Please run: pip install -r requirements.txt")
+    elif "googleapiclient" in str(e) or "google.oauth2" in str(e):
+        print("Error: Google API client not installed. Please run: pip install -r requirements.txt")
     else:
         print(f"Import error: {e}")
     sys.exit(1)
@@ -44,8 +49,104 @@ from config import (
     WHISPER_MODEL, POLL_INTERVAL, SUPPORTED_FORMATS,
     EMAIL_CONFIG, LOGGING_CONFIG, SSL_VERIFY, PROGRESS_CONFIG,
     VIDEO_FORMATS, AUDIO_EXTRACTION_CONFIG, PERFORMANCE_CONFIG,
-    GEMINI_CONFIG
+    GEMINI_CONFIG, GOOGLE_DRIVE_CONFIG
 )
+
+
+class GoogleDriveUploader:
+    """Handles uploading audio files to Google Drive using service account authentication"""
+    
+    def __init__(self, logger):
+        self.logger = logger
+        self.enabled = GOOGLE_DRIVE_CONFIG['enabled']
+        self.service = None
+        
+        if self.enabled:
+            self.setup_drive_service()
+        else:
+            self.logger.info("Google Drive upload disabled - no service account file provided")
+    
+    def setup_drive_service(self):
+        """Initialize Google Drive API service with service account"""
+        try:
+            if not GOOGLE_DRIVE_CONFIG['service_account_file']:
+                self.logger.warning("Google Drive service account file not specified")
+                self.enabled = False
+                return
+                
+            if not GOOGLE_DRIVE_CONFIG['folder_id']:
+                self.logger.warning("Google Drive folder ID not specified")
+                self.enabled = False
+                return
+            
+            # Load service account credentials
+            credentials = service_account.Credentials.from_service_account_file(
+                GOOGLE_DRIVE_CONFIG['service_account_file'],
+                scopes=['https://www.googleapis.com/auth/drive.file']
+            )
+            
+            # Build the Drive service
+            self.service = build('drive', 'v3', credentials=credentials)
+            
+            self.logger.info("Google Drive service initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Google Drive service: {e}")
+            self.enabled = False
+    
+    def upload_audio_file(self, audio_file_path: Path, original_filename: str) -> bool:
+        """Upload audio file to Google Drive"""
+        if not self.enabled:
+            self.logger.debug("Google Drive upload is disabled, skipping")
+            return True
+            
+        try:
+            # Create a meaningful filename for Google Drive
+            # Use original filename but ensure it has the correct audio extension
+            audio_extension = audio_file_path.suffix
+            base_name = Path(original_filename).stem
+            drive_filename = f"{base_name}{audio_extension}"
+            
+            self.logger.info(f"Uploading audio file to Google Drive: {drive_filename}")
+            
+            # Prepare file metadata
+            file_metadata = {
+                'name': drive_filename,
+                'parents': [GOOGLE_DRIVE_CONFIG['folder_id']]
+            }
+            
+            # Create media upload object
+            media = MediaFileUpload(
+                str(audio_file_path),
+                resumable=True
+            )
+            
+            # Upload the file with retry logic
+            for attempt in range(GOOGLE_DRIVE_CONFIG['max_retries']):
+                try:
+                    file = self.service.files().create(
+                        body=file_metadata,
+                        media_body=media,
+                        fields='id'
+                    ).execute()
+                    
+                    file_id = file.get('id')
+                    self.logger.info(f"Successfully uploaded audio file to Google Drive: {drive_filename} (ID: {file_id})")
+                    return True
+                    
+                except Exception as upload_error:
+                    self.logger.warning(f"Upload attempt {attempt + 1} failed: {upload_error}")
+                    if attempt < GOOGLE_DRIVE_CONFIG['max_retries'] - 1:
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                    else:
+                        raise upload_error
+            
+            return False
+            
+        except Exception as e:
+            error_msg = f"Failed to upload audio file '{original_filename}' to Google Drive: {str(e)}"
+            self.logger.error(error_msg)
+            return False
 
 
 class AudioTranscriber:
@@ -57,6 +158,7 @@ class AudioTranscriber:
         self.load_whisper_model()
         self.setup_temp_directory()
         self.setup_gemini()
+        self.setup_google_drive()
         self.last_progress = 0  # Track last reported progress percentage
         self.heartbeat_active = False  # Flag for heartbeat thread
         
@@ -144,6 +246,18 @@ class AudioTranscriber:
                 self.gemini_enabled = False
         else:
             self.logger.info("Gemini formatting disabled - no API key provided")
+    
+    def setup_google_drive(self):
+        """Setup Google Drive uploader for audio file backup"""
+        try:
+            self.drive_uploader = GoogleDriveUploader(self.logger)
+            if self.drive_uploader.enabled:
+                self.logger.info("Google Drive uploader initialized successfully")
+            else:
+                self.logger.info("Google Drive upload disabled")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Google Drive uploader: {e}")
+            self.drive_uploader = None
         
     def setup_directories(self):
         """Ensure all required directories exist"""
@@ -881,6 +995,15 @@ class AudioTranscriber:
             output_path = self.save_transcript(transcript, input_file.name)
             if not output_path:
                 return False
+                
+            # Upload audio file to Google Drive
+            if self.drive_uploader:
+                upload_success = self.drive_uploader.upload_audio_file(audio_file_to_process, input_file.name)
+                if not upload_success:
+                    error_msg = f"Failed to upload audio file '{input_file.name}' to Google Drive"
+                    self.send_error_email("Google Drive Upload Error", error_msg)
+                    self.logger.error(error_msg)
+                    # Continue processing even if upload fails - don't return False
                 
             # Move original file to processed
             if not self.move_to_processed(input_file):

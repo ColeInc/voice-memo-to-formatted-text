@@ -74,6 +74,15 @@ GEMINI_CONFIG = {
     'max_retries': 3
 }
 
+# Google Drive Configuration
+GOOGLE_DRIVE_CONFIG = {
+    'enabled': bool(os.getenv('GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE', '')),  # Auto-enable if service account file is present
+    'service_account_file': os.getenv('GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE', ''),
+    'folder_id': os.getenv('GOOGLE_DRIVE_FOLDER_ID', ''),
+    'timeout': 60,  # seconds for upload timeout
+    'max_retries': 3
+}
+
 # Logging Configuration
 LOGGING_CONFIG = {
     'level': 'INFO',
